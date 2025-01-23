@@ -104,7 +104,8 @@ class alignas(64) lfrbq
 protected:
 
     const uint32_t size;                    // capacity -- power of 2    xxxxx10...0
-    const uintptr_t mask;                   // capacity - 1              xxxxx01...1
+    const seq_t mask;                       // capacity - 1              xxxxx01...1
+    const seq_t seq_mask;                   // sequence w/o index bits   1111110...0
     const bool sp_mode;                     // single producer mode -- enqueue not thread-safe
     const bool sc_mode;                     // single consumer mode -- dequeue not thread-safe
 
@@ -123,6 +124,11 @@ protected:
      * @return index into array
      */
     unsigned int seq2ndx(seq_t seq) { return seq & mask; }
+
+    /**
+     * @brief Convert head or tail sequence to node sequence
+     */
+    inline seq_t seq2node(seq_t seq) { return seq & seq_mask; }
 
     /**
      * @brief  3-way comparator for seq_t values
@@ -145,6 +151,7 @@ public:
     lfrbq(uint32_t size, bool sp_mode, bool sc_mode) :
         size(size),
         mask(size - 1),
+        seq_mask(~mask),
         sp_mode(sp_mode),
         sc_mode(sc_mode)
     {
@@ -170,7 +177,8 @@ public:
         for (unsigned int ndx = 0; ndx < size; ndx++)
         {
             rbuffer[ndx].value.store(0, std::memory_order_relaxed);
-            this->rbuffer[ndx].seq.store(ndx, std::memory_order_relaxed);
+            // this->rbuffer[ndx].seq.store(ndx, std::memory_order_relaxed);
+            this->rbuffer[ndx].seq.store(0, std::memory_order_relaxed);
         }
 
     }   // CTOR
@@ -212,19 +220,19 @@ private:
         unsigned int ndx = seq2ndx(tail_copy);
         lfrbq_node *node = &rbuffer[ndx];
 
-        seq_t seq = node->seq.load(std::memory_order_acquire);
+        seq_t node_seq = node->seq.load(std::memory_order_acquire);
 
-        if (tail_copy != seq) {
+        if (node_seq != seq2node(tail_copy)) {
             return false;   // full
         }
 
         seq_t head_copy = head.load(std::memory_order_relaxed);
-        if (seq == head) {
+        if ((node_seq + ndx) == head_copy) {
             return false;   // full
         }
 
         node->value.store(value, std::memory_order_relaxed);
-        node->seq.store(seq + (seq_t) size, std::memory_order_release);
+        node->seq.store(node_seq + (seq_t) size, std::memory_order_release);
         tail.store(tail_copy + 1, std::memory_order_release);
 
         return true;
@@ -254,16 +262,16 @@ private:
             seq_t tail_copy = tail.load(std::memory_order_relaxed);
 
             unsigned int ndx = seq2ndx(tail_copy);
-            seq_t seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+            seq_t node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
 
-            while (xcmp(seq, tail_copy) > 0) {   // seq > tail
+            while (xcmp(node_seq, tail_copy) > 0) {   // seq > tail
 
-                uint64_t tail_latency = seq - tail_copy;
+                uint64_t tail_latency = node_seq - seq2node(tail_copy);
                 if (tail_latency > size)
                 {
                     tls_lfrbq_stats.producer_wraps++;
                     // fprintf(stderr, "wrapped tail seq=%llu tail_copy=%llu\n", seq, tail_copy);   // ???
-                    tail_copy = seq - size;
+                    tail_copy = (node_seq - size) + ndx;
                 }
                 else
                 {
@@ -271,12 +279,12 @@ private:
                 }
 
                 ndx = seq2ndx(tail_copy);
-                seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+                node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
             }
 
-            if (xcmp(seq, tail_copy) < 0)
+            if (xcmp(node_seq, seq2node(tail_copy)) < 0)
             {
-                fprintf(stderr, "invalid tail seq=%llu tail_copy=%llu\n", seq, tail_copy);   // ???
+                fprintf(stderr, "invalid tail seq=%llu tail_copy=%llu\n", node_seq, tail_copy);   // ???
                 continue;
             }
 
@@ -286,7 +294,7 @@ private:
             */
 
             seq_t head_copy = head.load(std::memory_order_relaxed);
-            if (seq == head_copy) {
+            if ((node_seq + ndx) == head_copy) {
                 return false; // full
             }
 
@@ -294,8 +302,8 @@ private:
             uintptr_t old_value = rbuffer[ndx].value.load(std::memory_order_relaxed);
 
 
-            lfrbq_node update((tail_copy + size), value);
-            lfrbq_node expected(tail_copy, old_value);
+            lfrbq_node update((seq2node(tail_copy) + size), value);
+            lfrbq_node expected(seq2node(tail_copy), old_value);
 
             if (atomic_compare_exchange_16xx(rbuffer[ndx], expected, update, std::memory_order_release))
             {
@@ -313,9 +321,9 @@ private:
         unsigned int ndx = seq2ndx(head_copy);
         lfrbq_node *node = &rbuffer[ndx];
 
-        seq_t seq = node->seq.load(std::memory_order_acquire);
+        seq_t node_seq = node->seq.load(std::memory_order_acquire);
 
-        if (seq != head_copy) {
+        if (node_seq != seq2node(head_copy)) {
             return false;   // empty
         }
 
@@ -333,8 +341,8 @@ private:
         do {
             unsigned int ndx = seq2ndx(head_copy);
 
-            seq_t seq = rbuffer[ndx].seq.load(std::memory_order_acquire);
-            int64_t cc = xcmp(seq, head_copy);
+            seq_t node_seq = rbuffer[ndx].seq.load(std::memory_order_acquire);
+            int64_t cc = xcmp(node_seq, seq2node(head_copy));
             if (cc < 0) {
                 return false;   // seq < head  --  empty
             }
