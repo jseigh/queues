@@ -99,6 +99,19 @@ struct alignas(16) lfrbq_node
 };
 
 
+// typedef bool (*updater)( int ndx, seq_t sequence, uintptr_t value);
+/**
+ * @brief update queue
+ * @param ndx index of queue node to update
+ * @param sequence current node sequence
+ * @param old_value current node value
+ * @param new_value optional new node value to set
+ * @retval true if node updated successfully
+ * @retval false if node update failed
+ */
+using updater_t =  bool (*)(unsigned int ndx, seq_t sequence, uintptr_t old_value, uintptr_t newvalue);
+using updater2_t = std::add_pointer_t<bool (unsigned int ndx, seq_t sequence, uintptr_t value, uintptr_t newvalue)>;
+
 class alignas(64) lfrbq
 {
 protected:
@@ -253,6 +266,96 @@ private:
         while (!tail.compare_exchange_strong(current_tail, new_tail, std::memory_order_release));
         return new_tail;
     }
+
+
+    lfrbq_status update_node(const bool any, updater_t updater, uintptr_t new_value)
+    {
+
+        for (;;)
+        {
+            seq_t tail_copy = tail.load(std::memory_order_relaxed);
+
+            unsigned int ndx = seq2ndx(tail_copy);
+            seq_t node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+            if (node_seq & 1)
+                return lfrbq_status::closed;
+
+            while (xcmp(node_seq, tail_copy) > 0) {   // seq > tail
+
+                uint64_t tail_latency = node_seq - seq2node(tail_copy);
+                if (tail_latency > size)
+                {
+                    tls_lfrbq_stats.producer_wraps++;
+                    // fprintf(stderr, "wrapped tail seq=%llu tail_copy=%llu\n", seq, tail_copy);   // ???
+                    tail_copy = (node_seq - size) + ndx;
+                }
+                else
+                {
+                    tail_copy++;
+                }
+
+                ndx = seq2ndx(tail_copy);
+                node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+                if (node_seq & 1)
+                    return lfrbq_status::closed;
+            }
+
+            if (xcmp(node_seq, seq2node(tail_copy)) < 0)
+            {
+                fprintf(stderr, "invalid tail seq=%llu tail_copy=%llu\n", node_seq, tail_copy);   // ???
+                continue;
+            }
+
+            /*
+            * tail_copy > seq  -- should never happen
+            * tail_copy == seq
+            */
+
+            if (!any)
+            {
+                seq_t head_copy = head.load(std::memory_order_relaxed);
+                if ((node_seq + ndx) == head_copy)
+                    return lfrbq_status::full;
+            }
+
+            // seq == tail
+            uintptr_t old_value = rbuffer[ndx].value.load(std::memory_order_relaxed);
+
+
+            auto x = updater(ndx, node_seq, old_value, new_value);
+            if (x)
+                return lfrbq_status::success;
+        }
+
+    }
+
+    bool update_node_value(unsigned int ndx, seq_t sequence, uintptr_t old_value, uintptr_t new_value)
+    {
+        lfrbq_node update(sequence + size, new_value);
+        lfrbq_node expected(sequence, old_value);
+
+        seq_t tail_copy = sequence + ndx;
+
+        if (atomic_compare_exchange_16xx(rbuffer[ndx], expected, update, std::memory_order_release))
+        {
+            try_update_tail(tail_copy + 1);
+            return true;
+        }
+        else
+        {
+            tls_lfrbq_stats.producer_retries++;
+            return false;
+        }
+    }
+
+    bool set_closed(unsigned int ndx, seq_t sequence, uintptr_t old_value, uintptr_t new_value)
+    {
+        lfrbq_node update(sequence, old_value | 1);
+        lfrbq_node expected(sequence, old_value);
+
+        return atomic_compare_exchange_16xx(rbuffer[ndx], expected, update, std::memory_order_release);
+    }
+
 
     bool enqueue_mp(uintptr_t value)
     {
