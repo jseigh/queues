@@ -43,7 +43,7 @@ public:
 
         for (int ndx = 0; ndx < size; ndx++)
         {
-            fprintf(out, "  node[%02d]: %4llu %4llu\n",
+            fprintf(out, "  node[%02d]: seq=%llu value%llu\n",
                 ndx,
                 rbuffer[ndx].seq.load(std::memory_order_relaxed),
                 rbuffer[ndx].value.load(std::memory_order_relaxed),
@@ -83,9 +83,9 @@ public:
             head_ndx,
             1);
 
-        bool cc = try_enqueue(value);
+        lfrbq_status status = try_enqueue(value);
         fprintf(stdout, "[%02d] value=%llu cc=%d\n", 
-            ndx, value, cc);
+            ndx, value, status);
     }
 
     void dequeue()
@@ -102,9 +102,9 @@ public:
             1);
 
         uintptr_t value2 = 0;
-        bool cc = try_dequeue(&value2);
+        lfrbq_status status = try_dequeue(&value2);
         fprintf(stdout, "[%02d] ==> %llu cc=%d\n", 
-            ndx, value2, cc);
+            ndx, value2, status);
     }
 
 
@@ -117,6 +117,7 @@ int main()
     fprintf(stdout, "lfrb node size=%d align= %d\n", sizeof(lfrbq_node), alignof(lfrbq_node));
 
     lfrbtest queue(8, mpmc);
+    // lfrbtest queue(8, spsc);
 
     queue.info();
 
@@ -127,18 +128,18 @@ int main()
     for (int ndx = 0; ndx < 6; ndx++)
         queue.enqueue(value++);
 
-    queue.dump("enqueue 6");
+    queue.dump("enqueued 6");
 
     for (int ndx = 0; ndx < 3; ndx++) {
         queue.dequeue();
     }
 
-    queue.dump("dequeue 3");
+    queue.dump("dequeued 3");
 
     for (int ndx = 0; ndx < 4; ndx++)
         queue.enqueue(value++);
 
-    queue.dump("enqueue 4");
+    queue.dump("enqueued 4");
 
     for (int ndx = 0; ndx < 26; ndx++) {
         queue.dequeue();
@@ -147,6 +148,13 @@ int main()
 
     queue.dump("dequeue/enqueue 10");
 
+    queue.close();
+
+    queue.dump("queue closed");
+
+    queue.enqueue(value++);
+
+    queue.dump("enqueue after queue closed");
 
     return 0;
 }
