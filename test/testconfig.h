@@ -61,7 +61,7 @@ static const char* sync_choices = "{eventcount, mutex, yield}";
 
 
 typedef struct testconfig_t {
-    unsigned int queue_size;    // lfrb queue size -- must be a power of 2
+    unsigned int capacity;    // lfrb queue capacity -- must be a power of 2
     lfrbq_type qtype;
 
     const char* qtype_name;
@@ -87,7 +87,7 @@ typedef struct testconfig_t {
 } testconfig_t;
 
 static const testconfig_t testconfig_init = {
-    queue_size : 8192,
+    capacity : 8192,
     qtype : mpmc,
     qtype_name : "mpmc",
     nproducers : 1,
@@ -159,7 +159,6 @@ static bool parse_options(testconfig_t* config, int argc, char** argv)
                 break;
         }
     }
-    // fprintf(stderr, "options=%s\n", short_options);
 
 
     for (;;)
@@ -196,7 +195,7 @@ static bool parse_options(testconfig_t* config, int argc, char** argv)
                 config->nconsumers = strtoul(optarg, NULL, 10);
                 break;
             case 's':
-                config->queue_size = strtoul(optarg, NULL, 10);
+                config->capacity = strtoul(optarg, NULL, 10);
                 break;
             case 'x':
                 ndx = find_enum(sync_names, optarg);
@@ -265,8 +264,7 @@ static bool parse_options(testconfig_t* config, int argc, char** argv)
         fprintf(stderr, "  -p --producers <arg>  number of producer threads (default %u)\n", testconfig_init.nproducers);
         fprintf(stderr, "  -c --consumers <arg>  number of producer threads (default %u)\n", testconfig_init.nconsumers);
         fprintf(stderr, "  -x --sync <name> queue enqueue/dequeue synchronization %s (default %s)\n", sync_choices, testconfig_init.sync_name);
-        fprintf(stderr, "  -s --size <arg>  queue size (power of 2) (default %u)\n", testconfig_init.queue_size);
-        // fprintf(stderr, "     --pause <arg> number of pause instructions in producer/consumer loops (default %u)\n", testconfig_init.pause_count);
+        fprintf(stderr, "  -s --size <arg>  queue capacity (power of 2) (default %u)\n", testconfig_init.capacity);
         fprintf(stderr, "  -q --quiet less output (default false)\n");
         fprintf(stderr, "  -v --verbose show config values (default false)\n");
         fprintf(stderr, "  -h --help show config values (default false)\n");
@@ -282,8 +280,7 @@ static bool parse_options(testconfig_t* config, int argc, char** argv)
         fprintf(stderr, "  producers=%u\n", config->nproducers);
         fprintf(stderr, "  consumers=%u\n", config->nconsumers);
         fprintf(stderr, "  sync=%s\n", config->sync_name);
-        fprintf(stderr, "  queue_size=%u\n", config->queue_size);
-        // fprintf(stderr, "  pause_count=%u\n", config->pause_count);
+        fprintf(stderr, "  capacity=%u\n", config->capacity);
         fprintf(stderr, "  quiet=%s\n", config->quiet ? "true" : "false");
         fprintf(stderr, "  verbose=%s\n", config->verbose ? "true" : "false");
         fprintf(stderr, "  debug=%s\n", config->debug ? "true" : "false");

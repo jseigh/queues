@@ -197,7 +197,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    rbq queue(config.queue_size, config.qtype, config.sync);
+    rbq queue(config.capacity, config.qtype, config.sync);
 
     std::thread producers[config.nproducers];
     std::thread consumers[config.nconsumers];

@@ -106,7 +106,7 @@ class alignas(64) lfrbq
 {
 protected:
 
-    const uint32_t size;                    // capacity -- power of 2    xxxxx10...0
+    const uint32_t capacity;                // capacity -- power of 2    xxxxx10...0
     const seq_t mask;                       // capacity - 1              xxxxx01...1
     const seq_t seq_mask;                   // sequence w/o index bits   1111110...0
     const bool sp_mode;                     // single producer mode -- enqueue not thread-safe
@@ -146,24 +146,24 @@ public:
 
     /**
      * @brief create lock-free ring buffer or bounded queue
-     * @param size or capacity of queue, must be power of 2
+     * @param capacity of queue, must be power of 2 and >= 2
      * @param sp_mode single producer if true
      * @param sc_mode single consumer if true
      * @throws invalid_argument if size not power of 2 or size is less than 2
      */
-    lfrbq(uint32_t size, bool sp_mode, bool sc_mode) :
-        size(size),
-        mask(size - 1),
+    lfrbq(uint32_t capacity, bool sp_mode, bool sc_mode) :
+        capacity(capacity),
+        mask(capacity - 1),
         seq_mask(~mask),
         sp_mode(sp_mode),
         sc_mode(sc_mode)
     {
-        if ((size & (size - 1)) != 0)
+        if ((capacity & (capacity - 1)) != 0)
         {
             throw std::invalid_argument("size not power of 2");
         }
 
-        if (size < 2)
+        if (capacity < 2)
         {
             throw std::invalid_argument("size is less than 2");
         }
@@ -171,18 +171,18 @@ public:
 
         /*--*/
 
-        this->head.store(size, std::memory_order_relaxed);
+        this->head.store(capacity, std::memory_order_relaxed);
         this->tail.store(0, std::memory_order_relaxed);
 
         /*
          * allocate and initialize ring buffer
         */
 
-        size_t sz = (size * sizeof(lfrbq_node));
+        size_t sz = (capacity * sizeof(lfrbq_node));
         this->rbuffer = (lfrbq_node*) aligned_alloc(16, sz);
         // memset(this->rbuffer, 0, sz);
 
-        for (unsigned int ndx = 0; ndx < size; ndx++)
+        for (unsigned int ndx = 0; ndx < capacity; ndx++)
         {
             rbuffer[ndx].value.store(0, std::memory_order_relaxed);
             // this->rbuffer[ndx].seq.store(ndx, std::memory_order_relaxed);
@@ -201,7 +201,7 @@ public:
 
     ~lfrbq()
     {
-        for (unsigned int ndx = 0; ndx < size; ndx++)
+        for (unsigned int ndx = 0; ndx < capacity; ndx++)
         {
             // invoke dtors if required
         }
@@ -232,7 +232,7 @@ private:
         }
 
         node->value.store(value, std::memory_order_relaxed);
-        node->seq.store(node_seq + (seq_t) size, std::memory_order_release);
+        node->seq.store(node_seq + (seq_t) capacity, std::memory_order_release);
         tail.store(tail_copy + 1, std::memory_order_release);
 
         return lfrbq_status::success;
@@ -282,11 +282,11 @@ private:
             while (xcmp(node_seq, tail_copy) > 0) {   // seq > tail
 
                 uint64_t tail_latency = node_seq - seq2node(tail_copy);
-                if (tail_latency > size)
+                if (tail_latency > capacity)
                 {
                     tls_lfrbq_stats.producer_wraps++;
                     // fprintf(stderr, "wrapped tail seq=%llu tail_copy=%llu\n", seq, tail_copy);   // ???
-                    tail_copy = (node_seq - size) + ndx;
+                    tail_copy = (node_seq - capacity) + ndx;
                 }
                 else
                 {
@@ -330,7 +330,7 @@ private:
 
     bool update_node_value(unsigned int ndx, seq_t sequence, uintptr_t old_value, uintptr_t new_value)
     {
-        lfrbq_node update(sequence + size, new_value);
+        lfrbq_node update(sequence + capacity, new_value);
         lfrbq_node expected(sequence, old_value);
 
         seq_t tail_copy = sequence + ndx;

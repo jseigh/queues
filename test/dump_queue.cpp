@@ -39,6 +39,47 @@ static lfrbq_type find_qtype(char* opt)
     return lfrbq_type::mpmc;
 }
 
+    using string = std::string;
+
+    static const string cmd_enq("enqueue");
+    static const string cmd_deq("dequeue");
+    static const string cmd_xchg("xchg");
+    static const string cmd_close("close");
+    static const string cmd_show("show");
+    static const string cmd_quit("quit");
+
+    static const string cmd_help("help");
+    static const string help_usage(
+        "interactive queue tester\n"
+        "usage: cmd <queue_type>\n"
+        "  where queue_type = mpmc|mpsc|spmc|spsc (default mpmc)\n"
+    );
+    static const string help_text(
+        "commands:\n"
+        "  enqueue <count>           -- enqueue <count values\n" 
+        "  dequeue <count>           -- dequeue <count> times\n"
+        "  xchg <count>              -- paired enqueue/dequeue\n"
+        "  close                     -- close the queue\n"
+        "  show                      -- dump queue\n"
+        "  quit                      -- exit\n"
+        "  help                      -- display help\n"
+    );
+
+bool check_help(bool usage, string arg)
+{
+    std::cout << "help? " << arg << "\n";
+    if (cmd_help.starts_with(arg)
+        || (arg == "--help")
+        || (arg == "-h"))
+    {
+        if (usage)
+            std::cout << help_usage;
+        std::cout << help_text;
+        return true;
+    }
+    else
+        return false;
+}
 
 const char* status_str(lfrbq_status status)
 {
@@ -69,18 +110,18 @@ public:
         fprintf(out, "%s:\n", label.c_str());
         seq_t head_copy = head.load(std::memory_order_relaxed);
         seq_t tail_copy = tail.load(std::memory_order_relaxed);
-        uint32_t q_size = (tail_copy + size) - head_copy;
+        uint32_t q_size = (tail_copy + capacity) - head_copy;
 
         fprintf(out, "  head = %llu head.seq=%llu head.ndx=%u\n", head_copy, seq2node(head_copy), seq2ndx(head_copy));
         fprintf(out, "  tail = %llu tail.seq=%llu tail.ndx=%u\n", tail_copy, seq2node(tail_copy), seq2ndx(tail_copy));
         fprintf(out, "  capacity=%u size=%u status=%s\n",
-            size, q_size, qclosed ? "closed" : "open");
+            capacity, q_size, qclosed ? "closed" : "open");
 
-        for (unsigned int ndx = 0; ndx < size; ndx++)
+        for (unsigned int ndx = 0; ndx < capacity; ndx++)
         {
             seq_t node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
             seq_t node_vseq = seq2node(node_seq) + ndx;
-            fprintf(out, "  node[%02d]: seq=%llu (%llu) value=%llu\n",
+            fprintf(out, "  node[%02d]: seq=%04llu (%04llu) value=%llu\n",
                 ndx,
                 node_seq, node_vseq,
                 rbuffer[ndx].value.load(std::memory_order_relaxed),
@@ -168,23 +209,20 @@ int main(int argc, char** argv)
 {
     lfrbq_type qtype = lfrbq_type::mpmc;
 
-    if (argc > 1)
+    fprintf(stdout, "argc=%d\n", argc);
+
+    if (argc > 1) {
+        string arg(argv[1]);
+        if (check_help(true, arg))
+            return 1;
+
         qtype = find_qtype(argv[1]);
+    }
 
     fprintf(stdout, "queue type = %s\n", qtype_names[qtype]);
 
-    using string = std::string;
 
-    string cmd_enq("enqueue");
-    string cmd_deq("dequeue");
-    string cmd_xchg("xchg");
-    string cmd_close("close");
-    string cmd_show("show");
-    string cmd_quit("quit");
-    string cmd_help("help");
-
-    lfrbtest queue(8, mpmc);
-    // lfrbtest queue(8, spsc);
+    lfrbtest queue(8, qtype);
 
     queue.info();
 
@@ -248,17 +286,9 @@ int main(int argc, char** argv)
         {
             break;
         }
-        
-        else if (cmd_help.starts_with(cmd))
-        {
-            std::cout << "enqueue <count>\n";
-            std::cout << "dequeue <count>\n";
-            std::cout << "xchg <count>  -- enqueue followed by dequeue\n";
-            std::cout << "close\n";
-            std::cout << "show\n";
-            std::cout << "quit\n";
-            std::cout << "help\n";
-        }
+
+        else if (check_help(false, cmd))
+            ;
         
         else
         {
