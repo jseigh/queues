@@ -192,8 +192,6 @@ int main(int argc, char** argv)
 
     bool rc = parse_options(&config, argc, argv);
     if (!rc) {
-        fprintf(stderr, "config parse options returned false\n");
-
         return 1;
     }
 

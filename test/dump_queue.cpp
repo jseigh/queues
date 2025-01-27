@@ -67,7 +67,6 @@ static lfrbq_type find_qtype(char* opt)
 
 bool check_help(bool usage, string arg)
 {
-    std::cout << "help? " << arg << "\n";
     if (cmd_help.starts_with(arg)
         || (arg == "--help")
         || (arg == "-h"))
@@ -208,8 +207,6 @@ static unsigned int get_count()
 int main(int argc, char** argv)
 {
     lfrbq_type qtype = lfrbq_type::mpmc;
-
-    fprintf(stdout, "argc=%d\n", argc);
 
     if (argc > 1) {
         string arg(argv[1]);
