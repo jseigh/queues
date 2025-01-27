@@ -17,6 +17,7 @@
 #include <thread>
 #include <string>
 #include <atomic>
+#include <iostream>
 
 #include <stdio.h>
 
@@ -25,24 +26,103 @@
 
 #include <eventcount.h>
 
+static const char* qtype_names[] = {"mpmc", "mpsc", "spmc", "spsc", NULL};
+static const lfrbq_type qtype[] = {mpmc, mpsc, spmc, spsc};
+
+static lfrbq_type find_qtype(char* opt)
+{
+    for (int ndx = 0; qtype_names[ndx] != NULL; ndx++) {
+        if (strcasecmp(opt, qtype_names[ndx]) == 0)
+            return qtype[ndx];
+    }
+
+    return lfrbq_type::mpmc;
+}
+
+    using string = std::string;
+
+    static const string cmd_enq("enqueue");
+    static const string cmd_deq("dequeue");
+    static const string cmd_xchg("xchg");
+    static const string cmd_close("close");
+    static const string cmd_show("show");
+    static const string cmd_quit("quit");
+
+    static const string cmd_help("help");
+    static const string help_usage(
+        "interactive queue tester\n"
+        "usage: cmd <queue_type>\n"
+        "  where queue_type = mpmc|mpsc|spmc|spsc (default mpmc)\n"
+    );
+    static const string help_text(
+        "commands:\n"
+        "  enqueue <count>           -- enqueue <count values\n" 
+        "  dequeue <count>           -- dequeue <count> times\n"
+        "  xchg <count>              -- paired enqueue/dequeue\n"
+        "  close                     -- close the queue\n"
+        "  show                      -- dump queue\n"
+        "  quit                      -- exit\n"
+        "  help                      -- display help\n"
+    );
+
+bool check_help(bool usage, string arg)
+{
+    if (cmd_help.starts_with(arg)
+        || (arg == "--help")
+        || (arg == "-h"))
+    {
+        if (usage)
+            std::cout << help_usage;
+        std::cout << help_text;
+        return true;
+    }
+    else
+        return false;
+}
+
+const char* status_str(lfrbq_status status)
+{
+    switch (status)
+    {
+    case lfrbq_status::success: return "success";
+    case lfrbq_status::full: return "full";
+    case lfrbq_status::empty: return "empty";
+    case lfrbq_status::closed: return "closed";
+    case lfrbq_status::fail: return "fail";
+    default: return "?";
+    }
+}
 
 class lfrbtest : public lfrbq
 {
 public:
     using lfrbq::lfrbq;
 
+    // unsigned int get_size()
+    // {
+    //     return head.load(std::memory_order_relaxed) - tail.load(std::memory_order_relaxed) - this->size;
+    // }
+
 
     void dump(FILE* out, std::string label)
     {
         fprintf(out, "%s:\n", label.c_str());
-        fprintf(out, "  head = %llu\n", head.load(std::memory_order_relaxed));
-        fprintf(out, "  tail = %llu\n", tail.load(std::memory_order_relaxed));
+        seq_t head_copy = head.load(std::memory_order_relaxed);
+        seq_t tail_copy = tail.load(std::memory_order_relaxed);
+        uint32_t q_size = (tail_copy + capacity) - head_copy;
 
-        for (int ndx = 0; ndx < size; ndx++)
+        fprintf(out, "  head = %llu head.seq=%llu head.ndx=%u\n", head_copy, seq2node(head_copy), seq2ndx(head_copy));
+        fprintf(out, "  tail = %llu tail.seq=%llu tail.ndx=%u\n", tail_copy, seq2node(tail_copy), seq2ndx(tail_copy));
+        fprintf(out, "  capacity=%u size=%u status=%s\n",
+            capacity, q_size, qclosed ? "closed" : "open");
+
+        for (unsigned int ndx = 0; ndx < capacity; ndx++)
         {
-            fprintf(out, "  node[%02d]: %4llu %4llu\n",
+            seq_t node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+            seq_t node_vseq = seq2node(node_seq) + ndx;
+            fprintf(out, "  node[%02d]: seq=%04llu (%04llu) value=%llu\n",
                 ndx,
-                rbuffer[ndx].seq.load(std::memory_order_relaxed),
+                node_seq, node_vseq,
                 rbuffer[ndx].value.load(std::memory_order_relaxed),
                 1);
         }
@@ -54,42 +134,167 @@ public:
         dump(stdout, label);
     }
 
-    seq_t get_head() { return head.load(); }
+    void info()
+    {
+        fprintf(stdout, "mask = %llx seq_mask = %llx\n", mask, seq_mask);
+    }
+
+    void enqueue(uintptr_t value)
+    {
+        seq_t head_copy = head.load(std::memory_order_relaxed);
+        seq_t head_seq = seq2node(head_copy);
+        int head_ndx = seq2ndx(head_copy);
+
+
+        seq_t tail_copy = tail.load(std::memory_order_relaxed);
+        int ndx = seq2ndx(tail_copy);
+        seq_t tail_seq = seq2node(tail_copy);
+        seq_t node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+        fprintf(stdout, "enqueue: tail=%llu tail.seq=%llu, ndx=%u node.seq=%llu -- head=%llu head.seq=%llu head_ndx=%u\n",
+            tail_copy,
+            tail_seq,
+            ndx,
+            node_seq,
+            head_copy,
+            head_seq,
+            head_ndx,
+            1);
+
+        lfrbq_status status = try_enqueue(value);
+        fprintf(stdout, "[%02d] value=%llu cc=%d (%s)\n", 
+            ndx, value, status, status_str(status));
+    }
+
+    void dequeue()
+    {
+        seq_t head_copy = head.load(std::memory_order_relaxed);
+        int ndx = seq2ndx(head_copy);
+        seq_t head_seq = seq2node(head_copy);
+        seq_t node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+        fprintf(stdout, "dequeue: head=%llu head.seq=%llu, ndx=%u node.seq=%llu\n",
+            head_copy,
+            head_seq,
+            ndx,
+            node_seq,
+            1);
+
+        uintptr_t value2 = 0;
+        lfrbq_status status = try_dequeue(&value2);
+        fprintf(stdout, "[%02d] ==> %llu cc=%d (%s)\n", 
+            ndx, value2, status, status_str(status));
+    }
 
 
 };
 
 
-int main()
+static unsigned int get_count()
 {
-    fprintf(stdout, "lfrb node size=%d align= %d\n", sizeof(lfrbq_node), alignof(lfrbq_node));
+    unsigned int count;
+    std::cin >> count;
+    if (std::cin.fail())
+    {
+        std::cin.clear();
+        return 0;
+    }
+    else
+    {
+        return count;
+    }
+}
 
-    lfrbtest queue(8, true, true);
+
+int main(int argc, char** argv)
+{
+    lfrbq_type qtype = lfrbq_type::mpmc;
+
+    if (argc > 1) {
+        string arg(argv[1]);
+        if (check_help(true, arg))
+            return 1;
+
+        qtype = find_qtype(argv[1]);
+    }
+
+    fprintf(stdout, "queue type = %s\n", qtype_names[qtype]);
+
+
+    lfrbtest queue(8, qtype);
+
+    queue.info();
 
     queue.dump("init");
 
     int value = 1000;
-    uintptr_t value2;
+    std::string cmd;
+    unsigned int count;
 
-    for (int ndx = 0; ndx < 6; ndx++)
-        queue.try_enqueue(value++);
+    for (;;)
+    {
+        std::cin >> cmd;
+        if (std::cin.eof())
+            break;
+        if (std::cin.bad())
+            break;
+        if (std::cin.fail())
+            break;
 
-    queue.dump("enqueue 6");
+        fprintf(stdout, "command=%s\n", cmd.c_str());
 
-    for (int ndx = 0; ndx < 3; ndx++) {
-        seq_t head = queue.get_head();
-        value2 = 0;
-        queue.try_dequeue(&value2);
-        fprintf(stdout, "[%02d] ==> %llu\n", head, value2);
+        if (cmd_enq.starts_with(cmd))
+        {
+            count = get_count();
+            for (unsigned int ndx = 0; ndx < count; ndx++)
+            {
+                queue.enqueue(value++);
+            }
+        }
+
+        else if (cmd_deq.starts_with(cmd))
+        {
+            count = get_count();
+            for (unsigned int ndx = 0; ndx < count; ndx++)
+            {
+                queue.dequeue();
+            }
+        }
+
+        else if (cmd_xchg.starts_with(cmd))
+        {
+            count = get_count();
+            for (unsigned int ndx = 0; ndx < count; ndx++)
+            {
+                queue.enqueue(value++);
+                queue.dequeue();
+            }
+        }
+
+        else if (cmd_close.starts_with(cmd))
+        {
+            queue.close();
+        }
+        
+        else if (cmd_show.starts_with(cmd))
+        {
+            queue.dump("queue");
+        }
+        
+        else if (cmd_quit.starts_with(cmd))
+        {
+            break;
+        }
+
+        else if (check_help(false, cmd))
+            ;
+        
+        else
+        {
+            std::cout <<  "unknown command\n";
+        }
+
+        std::cin.ignore(1024, '\n');
+        std::cout << "\n";
     }
-
-    queue.dump("dequeue 3");
-
-    for (int ndx = 0; ndx < 4; ndx++)
-        queue.try_enqueue(value++);
-
-    queue.dump("enqueue 4");
-
 
     return 0;
 }

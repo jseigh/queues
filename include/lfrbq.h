@@ -54,6 +54,8 @@ inline thread_local lfrbq_stats_t tls_lfrbq_stats;
 using seq_t = uint64_t;
 using stat_t = uint32_t;
 
+constexpr seq_t Q_CLOSED = 1;   // sequence bit indicating queue has been closed
+
 /**
  * @brief lfrb queue type
  *
@@ -99,12 +101,14 @@ struct alignas(16) lfrbq_node
 };
 
 
+
 class alignas(64) lfrbq
 {
 protected:
 
-    const uint32_t size;                    // capacity -- power of 2    xxxxx10...0
-    const uintptr_t mask;                   // capacity - 1              xxxxx01...1
+    const uint32_t capacity;                // capacity -- power of 2    xxxxx10...0
+    const seq_t mask;                       // capacity - 1              xxxxx01...1
+    const seq_t seq_mask;                   // sequence w/o index bits   1111110...0
     const bool sp_mode;                     // single producer mode -- enqueue not thread-safe
     const bool sc_mode;                     // single consumer mode -- dequeue not thread-safe
 
@@ -125,6 +129,11 @@ protected:
     unsigned int seq2ndx(seq_t seq) { return seq & mask; }
 
     /**
+     * @brief Convert head or tail sequence to node sequence
+     */
+    inline seq_t seq2node(seq_t seq) { return seq & seq_mask; }
+
+    /**
      * @brief  3-way comparator for seq_t values
      * @param a 
      * @param b 
@@ -137,40 +146,47 @@ public:
 
     /**
      * @brief create lock-free ring buffer or bounded queue
-     * @param size or capacity of queue, must be power of 2
+     * @param capacity of queue, must be power of 2 and >= 2
      * @param sp_mode single producer if true
      * @param sc_mode single consumer if true
-     * @throws invalid_argument if size not power of 2
+     * @throws invalid_argument if size not power of 2 or size is less than 2
      */
-    lfrbq(uint32_t size, bool sp_mode, bool sc_mode) :
-        size(size),
-        mask(size - 1),
+    lfrbq(uint32_t capacity, bool sp_mode, bool sc_mode) :
+        capacity(capacity),
+        mask(capacity - 1),
+        seq_mask(~mask),
         sp_mode(sp_mode),
         sc_mode(sc_mode)
     {
-        if ((size & (size - 1)) != 0)
+        if ((capacity & (capacity - 1)) != 0)
         {
             throw std::invalid_argument("size not power of 2");
+        }
+
+        if (capacity < 2)
+        {
+            throw std::invalid_argument("size is less than 2");
         }
 
 
         /*--*/
 
-        this->head.store(size, std::memory_order_relaxed);
+        this->head.store(capacity, std::memory_order_relaxed);
         this->tail.store(0, std::memory_order_relaxed);
 
         /*
          * allocate and initialize ring buffer
         */
 
-        size_t sz = (size * sizeof(lfrbq_node));
+        size_t sz = (capacity * sizeof(lfrbq_node));
         this->rbuffer = (lfrbq_node*) aligned_alloc(16, sz);
         // memset(this->rbuffer, 0, sz);
 
-        for (unsigned int ndx = 0; ndx < size; ndx++)
+        for (unsigned int ndx = 0; ndx < capacity; ndx++)
         {
             rbuffer[ndx].value.store(0, std::memory_order_relaxed);
-            this->rbuffer[ndx].seq.store(ndx, std::memory_order_relaxed);
+            // this->rbuffer[ndx].seq.store(ndx, std::memory_order_relaxed);
+            this->rbuffer[ndx].seq.store(0, std::memory_order_relaxed);
         }
 
     }   // CTOR
@@ -185,49 +201,41 @@ public:
 
     ~lfrbq()
     {
-        for (unsigned int ndx = 0; ndx < size; ndx++)
+        for (unsigned int ndx = 0; ndx < capacity; ndx++)
         {
             // invoke dtors if required
         }
         free(rbuffer);
     }
 
-    /**
-     * @brief close the queue
-     */
-    void close() { qclosed.store(true, std::memory_order_release); }
-    /**
-     * @brief get queue closed status
-     * @retval true queue is closed
-     * @retval false queue is not closed
-     */
-    bool closed() { return qclosed.load(std::memory_order_acquire); }
-
 private:
 
-    bool enqueue_sp(uintptr_t value)
+    lfrbq_status enqueue_sp(uintptr_t value)
     {
         seq_t tail_copy = tail.load(std::memory_order_relaxed);   // always current
 
         unsigned int ndx = seq2ndx(tail_copy);
         lfrbq_node *node = &rbuffer[ndx];
 
-        seq_t seq = node->seq.load(std::memory_order_acquire);
+        seq_t node_seq = node->seq.load(std::memory_order_acquire);
 
-        if (tail_copy != seq) {
-            return false;   // full
+        if (node_seq & Q_CLOSED)
+            return lfrbq_status::closed;
+
+        if (node_seq != seq2node(tail_copy)) {
+            return lfrbq_status::full;   // full
         }
 
         seq_t head_copy = head.load(std::memory_order_relaxed);
-        if (seq == head) {
-            return false;   // full
+        if ((node_seq + ndx) == head_copy) {
+            return lfrbq_status::full;   // full
         }
 
         node->value.store(value, std::memory_order_relaxed);
-        node->seq.store(seq + (seq_t) size, std::memory_order_release);
+        node->seq.store(node_seq + (seq_t) capacity, std::memory_order_release);
         tail.store(tail_copy + 1, std::memory_order_release);
 
-        return true;
+        return lfrbq_status::success;
     }
 
     /**
@@ -246,24 +254,39 @@ private:
         return new_tail;
     }
 
-    bool enqueue_mp(uintptr_t value)
+    /**
+     * @brief update queue
+     * @param ndx index of queue node to update
+     * @param sequence current node sequence
+     * @param old_value current node value
+     * @param new_value optional new node value to set
+     * @retval true if node updated successfully
+     * @retval false if node update failed
+     */
+    using updater_t =  bool (lfrbq::*)(unsigned int ndx, seq_t sequence, uintptr_t old_value, uintptr_t newvalue);
+    // using updater2_t = std::add_pointer_t<bool (lfrbq::)(unsigned int ndx, seq_t sequence, uintptr_t value, uintptr_t newvalue)>;
+
+
+    lfrbq_status update_node(const bool any, updater_t updater, uintptr_t new_value = 0)
     {
-        // outer_loop:
+
         for (;;)
         {
             seq_t tail_copy = tail.load(std::memory_order_relaxed);
 
             unsigned int ndx = seq2ndx(tail_copy);
-            seq_t seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+            seq_t node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+            if (node_seq & 1)
+                return lfrbq_status::closed;
 
-            while (xcmp(seq, tail_copy) > 0) {   // seq > tail
+            while (xcmp(node_seq, tail_copy) > 0) {   // seq > tail
 
-                uint64_t tail_latency = seq - tail_copy;
-                if (tail_latency > size)
+                uint64_t tail_latency = node_seq - seq2node(tail_copy);
+                if (tail_latency > capacity)
                 {
                     tls_lfrbq_stats.producer_wraps++;
                     // fprintf(stderr, "wrapped tail seq=%llu tail_copy=%llu\n", seq, tail_copy);   // ???
-                    tail_copy = seq - size;
+                    tail_copy = (node_seq - capacity) + ndx;
                 }
                 else
                 {
@@ -271,12 +294,14 @@ private:
                 }
 
                 ndx = seq2ndx(tail_copy);
-                seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+                node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+                if (node_seq & Q_CLOSED)
+                    return lfrbq_status::closed;
             }
 
-            if (xcmp(seq, tail_copy) < 0)
+            if (xcmp(node_seq, seq2node(tail_copy)) < 0)
             {
-                fprintf(stderr, "invalid tail seq=%llu tail_copy=%llu\n", seq, tail_copy);   // ???
+                fprintf(stderr, "invalid tail seq=%llu tail_copy=%llu\n", node_seq, tail_copy);   // ???
                 continue;
             }
 
@@ -285,26 +310,116 @@ private:
             * tail_copy == seq
             */
 
-            seq_t head_copy = head.load(std::memory_order_relaxed);
-            if (seq == head_copy) {
-                return false; // full
+            if (!any)
+            {
+                seq_t head_copy = head.load(std::memory_order_relaxed);
+                if ((node_seq + ndx) == head_copy)
+                    return lfrbq_status::full;
             }
 
             // seq == tail
             uintptr_t old_value = rbuffer[ndx].value.load(std::memory_order_relaxed);
 
 
-            lfrbq_node update((tail_copy + size), value);
-            lfrbq_node expected(tail_copy, old_value);
+            auto x = (this->*updater)(ndx, node_seq, old_value, new_value);
+            if (x)
+                return lfrbq_status::success;
+        }
 
-            if (atomic_compare_exchange_16xx(rbuffer[ndx], expected, update, std::memory_order_release))
-            {
-                try_update_tail(tail_copy + 1);
-                return true;
-            }
+    }
+
+    bool update_node_value(unsigned int ndx, seq_t sequence, uintptr_t old_value, uintptr_t new_value)
+    {
+        lfrbq_node update(sequence + capacity, new_value);
+        lfrbq_node expected(sequence, old_value);
+
+        seq_t tail_copy = sequence + ndx;
+
+        if (atomic_compare_exchange_16xx(rbuffer[ndx], expected, update, std::memory_order_release))
+        {
+            try_update_tail(tail_copy + 1);
+            return true;
+        }
+        else
+        {
             tls_lfrbq_stats.producer_retries++;
+            return false;
         }
     }
+
+    bool set_closed(unsigned int ndx, seq_t sequence, uintptr_t old_value, uintptr_t new_value)
+    {
+        lfrbq_node update(sequence | Q_CLOSED, old_value);
+        lfrbq_node expected(sequence, old_value);
+
+        return atomic_compare_exchange_16xx(rbuffer[ndx], expected, update, std::memory_order_release);
+    }
+
+    lfrbq_status enqueue_mp(uintptr_t value)
+    {
+        return update_node(false,  &lfrbq::update_node_value, value);
+    }
+
+
+    // bool enqueue_mp(uintptr_t value)
+    // {
+    //     // outer_loop:
+    //     for (;;)
+    //     {
+    //         seq_t tail_copy = tail.load(std::memory_order_relaxed);
+
+    //         unsigned int ndx = seq2ndx(tail_copy);
+    //         seq_t node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+
+    //         while (xcmp(node_seq, tail_copy) > 0) {   // seq > tail
+
+    //             uint64_t tail_latency = node_seq - seq2node(tail_copy);
+    //             if (tail_latency > size)
+    //             {
+    //                 tls_lfrbq_stats.producer_wraps++;
+    //                 // fprintf(stderr, "wrapped tail seq=%llu tail_copy=%llu\n", seq, tail_copy);   // ???
+    //                 tail_copy = (node_seq - size) + ndx;
+    //             }
+    //             else
+    //             {
+    //                 tail_copy++;
+    //             }
+
+    //             ndx = seq2ndx(tail_copy);
+    //             node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+    //         }
+
+    //         if (xcmp(node_seq, seq2node(tail_copy)) < 0)
+    //         {
+    //             fprintf(stderr, "invalid tail seq=%llu tail_copy=%llu\n", node_seq, tail_copy);   // ???
+    //             continue;
+    //         }
+
+    //         /*
+    //         * tail_copy > seq  -- should never happen
+    //         * tail_copy == seq
+    //         */
+
+    //         seq_t head_copy = head.load(std::memory_order_relaxed);
+    //         if ((node_seq + ndx) == head_copy) {
+    //             return false; // full
+    //         }
+
+    //         // seq == tail
+    //         uintptr_t old_value = rbuffer[ndx].value.load(std::memory_order_relaxed);
+
+
+    //         lfrbq_node update((seq2node(tail_copy) + size), value);
+    //         lfrbq_node expected(seq2node(tail_copy), old_value);
+
+    //         if (atomic_compare_exchange_16xx(rbuffer[ndx], expected, update, std::memory_order_release))
+    //         {
+    //             try_update_tail(tail_copy + 1);
+    //             return true;
+    //         }
+    //         tls_lfrbq_stats.producer_retries++;
+    //     }
+    // }
 
     bool dequeue_sc(uintptr_t *value)
     {
@@ -313,9 +428,9 @@ private:
         unsigned int ndx = seq2ndx(head_copy);
         lfrbq_node *node = &rbuffer[ndx];
 
-        seq_t seq = node->seq.load(std::memory_order_acquire);
+        seq_t node_seq = node->seq.load(std::memory_order_acquire);
 
-        if (seq != head_copy) {
+        if (node_seq != seq2node(head_copy)) {
             return false;   // empty
         }
 
@@ -333,8 +448,8 @@ private:
         do {
             unsigned int ndx = seq2ndx(head_copy);
 
-            seq_t seq = rbuffer[ndx].seq.load(std::memory_order_acquire);
-            int64_t cc = xcmp(seq, head_copy);
+            seq_t node_seq = rbuffer[ndx].seq.load(std::memory_order_acquire);
+            int64_t cc = xcmp(node_seq, seq2node(head_copy));
             if (cc < 0) {
                 return false;   // seq < head  --  empty
             }
@@ -360,6 +475,32 @@ private:
 public:
 
     /**
+     * @brief close the queue
+     */
+    void close()
+    {
+        qclosed.store(true, std::memory_order_release);
+
+        if (sp_mode)
+        {
+            seq_t tail_copy = tail.load(std::memory_order_relaxed);
+            unsigned int ndx = seq2ndx(tail_copy);
+            rbuffer[ndx].seq.fetch_or(Q_CLOSED, std::memory_order_release);
+        }
+        else
+        {
+            update_node(true, &lfrbq::set_closed);
+        }
+    }
+
+    /**
+     * @brief get queue closed status
+     * @retval true queue is closed
+     * @retval false queue is not closed
+     */
+    bool closed() { return qclosed.load(std::memory_order_acquire); }
+
+    /**
      * @brief enqueue a value
      * @param value to be queued
      * @retval lfrbq_status::success enqueue succeeded
@@ -368,15 +509,13 @@ public:
      */
     lfrbq_status try_enqueue(uintptr_t value)
     {
-        if (closed())
-            return lfrbq_status::closed;
-        else if (sp_mode ? enqueue_sp(value) : enqueue_mp(value))
-            return lfrbq_status::success;
-        else
+        lfrbq_status status = sp_mode ? enqueue_sp(value) : enqueue_mp(value);
+        switch (status)
         {
-            tls_lfrbq_stats.queue_full_count++;
-            return lfrbq_status::full;
+            case lfrbq_status::full:
+                tls_lfrbq_stats.queue_full_count++;
         }
+        return status;
     }
 
     /**
