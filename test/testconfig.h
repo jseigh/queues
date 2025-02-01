@@ -54,9 +54,9 @@ static const char* qtype_names[] = {"mpmc", "mpsc", "spmc", "spsc", NULL};
 static const lfrbq_type qtype[] = {mpmc, mpsc, spmc, spsc};
 static const char* qtype_choices = "{mpmc, mpsc, spmc, spsc}";
 
-static const char* sync_names[] = {"eventcount", "mutex", "yield", NULL};
-static const rbq_sync sync_values[] = {rbq_sync::eventcount, rbq_sync::mutex, rbq_sync::yield };
-static const char* sync_choices = "{eventcount, mutex, yield}";
+static const char* sync_names[] = {"eventcount", "mutex", "yield", "atomic32", NULL};
+static const rbq_sync sync_values[] = {rbq_sync::eventcount, rbq_sync::mutex, rbq_sync::yield , rbq_sync::atomic32};
+static const char* sync_choices = "{eventcount, mutex, yield, atomic32}";
 
 
 

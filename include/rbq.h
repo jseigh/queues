@@ -29,7 +29,8 @@ enum rbq_sync
 {
     eventcount,     // use eventcount
     mutex,          // use mutex and cvars
-    yield           // use yield()
+    yield,          // use yield()
+    atomic32        // use atomic wait/notify
 };
 
 class rbq : public lfrbq
@@ -41,6 +42,9 @@ class rbq : public lfrbq
     std::condition_variable producer_cvar;
     std::mutex consumer_mutex;
     std::condition_variable consumer_cvar;
+
+    std::atomic<uint32_t> producer_atomic32 = 0;    // use atomic wait/notify
+    std::atomic<uint32_t> consumer_atomic32 = 0;    // use atomic wait/notify
 
     const rbq_sync sync = rbq_sync::eventcount;
 
@@ -196,7 +200,7 @@ private:
             switch (status)
             {
                 case lfrbq_status::success:
-                    consumer_cvar.notify_all();
+                    consumer_cvar.notify_one();
                     return status;
                 case lfrbq_status::closed:
                     return status;
@@ -220,7 +224,7 @@ private:
             switch (status)
             {
                 case lfrbq_status::success:
-                    producer_cvar.notify_all();
+                    producer_cvar.notify_one();
                     return status;
                 case lfrbq_status::closed:
                     return status;
@@ -229,6 +233,54 @@ private:
                 default:
                     tls_lfrbq_stats.consumer_waits++;
                     consumer_cvar.wait(lk);
+                    break;
+            }
+        }
+    }
+
+    lfrbq_status enqueue_a32(uintptr_t value)
+    {
+        for (;;)
+        {
+            uint32_t mark = consumer_atomic32.load(std::memory_order_acquire);
+            lfrbq_status status = try_enqueue(value);
+            switch (status)
+            {
+                case lfrbq_status::success:
+                    producer_atomic32.fetch_add(1, std::memory_order_relaxed);
+                    producer_atomic32.notify_one();
+                    return status;
+                case lfrbq_status::closed:
+                    return status;
+
+                case lfrbq_status::full:
+                default:
+                    tls_lfrbq_stats.producer_waits++;
+                    consumer_atomic32.wait(mark);
+                    break;
+            }
+        }
+    }   
+
+    lfrbq_status dequeue_a32(uintptr_t *value)
+    {
+        for (;;)
+        {
+            uint32_t mark = producer_atomic32.load(std::memory_order_acquire);
+            lfrbq_status status = try_dequeue(value);
+            switch (status)
+            {
+                case lfrbq_status::success:
+                    consumer_atomic32.fetch_add(1, std::memory_order_relaxed);
+                    consumer_atomic32.notify_one();
+                    return status;
+                case lfrbq_status::closed:
+                    return status;
+
+                case lfrbq_status::empty:
+                default:
+                    tls_lfrbq_stats.consumer_waits++;
+                    producer_atomic32.wait(mark);
                     break;
             }
         }
@@ -251,6 +303,7 @@ public:
             case rbq_sync::mutex: return enqueue_mx(value);
             case rbq_sync::eventcount: return enqueue_ec(value);
             case rbq_sync::yield: return enqueue_x(value);
+            case rbq_sync::atomic32: return enqueue_a32(value);
 
             default: return lfrbq_status::fail;
         }
@@ -269,6 +322,7 @@ public:
             case rbq_sync::mutex: return dequeue_mx(value);
             case rbq_sync::eventcount: return dequeue_ec(value);
             case rbq_sync::yield: return dequeue_x(value);
+            case rbq_sync::atomic32: return dequeue_a32(value);
 
             default: return lfrbq_status::fail;
         }
@@ -291,6 +345,11 @@ public:
 
         producer_cvar.notify_all();
         consumer_cvar.notify_all();
+
+        producer_atomic32.fetch_add(1, std::memory_order_relaxed);
+        producer_atomic32.notify_all();
+        consumer_atomic32.fetch_add(1, std::memory_order_relaxed);
+        consumer_atomic32.notify_all();
     }
 
 };
