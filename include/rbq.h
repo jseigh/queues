@@ -81,7 +81,7 @@ private:
             switch (status)
             {
                 case lfrbq_status::success:
-                    consumer_eventcount.post();
+                    producer_eventcount.post();
                     return status;
                 case lfrbq_status::closed:
                     return status;
@@ -91,13 +91,13 @@ private:
                     break;
             }
 
-            uint32_t mark = producer_eventcount.mark();
+            uint32_t mark = consumer_eventcount.mark();
             status = try_enqueue(value);
             switch (status)
             {
                 case lfrbq_status::success:
-                    producer_eventcount.reset(mark);
-                    consumer_eventcount.post();
+                    consumer_eventcount.reset(mark);
+                    producer_eventcount.post();
                     return status;
                 case lfrbq_status::closed:
                     return status;
@@ -108,7 +108,7 @@ private:
                     break;
             }
             tls_lfrbq_stats.producer_waits++;
-            producer_eventcount.wait(mark);   
+            consumer_eventcount.wait(mark);   
         }
     }
 
@@ -120,7 +120,7 @@ private:
             switch (status)
             {
                 case lfrbq_status::success:
-                    producer_eventcount.post();
+                    consumer_eventcount.post();
                     return status;
                 case lfrbq_status::closed:
                     return status;
@@ -130,13 +130,13 @@ private:
                     break;
             }
 
-            uint32_t mark = consumer_eventcount.mark();
+            uint32_t mark = producer_eventcount.mark();
             status = try_dequeue(value);
             switch (status)
             {
                 case lfrbq_status::success:
-                    consumer_eventcount.reset(mark);
-                    producer_eventcount.post();
+                    producer_eventcount.reset(mark);
+                    consumer_eventcount.post();
                     return status;
                 case lfrbq_status::closed:
                     return status;
@@ -147,7 +147,7 @@ private:
                     break;
             }
             tls_lfrbq_stats.consumer_waits++;
-            consumer_eventcount.wait(mark);   
+            producer_eventcount.wait(mark);   
         }
     }
 
