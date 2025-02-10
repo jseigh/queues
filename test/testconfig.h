@@ -72,8 +72,6 @@ typedef struct testconfig_t {
 
     unsigned int count;         // enqueue count -- per producer
 
-    // unsigned int pause_count;   // number of pause instructions
-
     rbq_sync sync;
     const char* sync_name;
 
@@ -93,7 +91,6 @@ static const testconfig_t testconfig_init = {
     nproducers : 1,
     nconsumers : 1,
     count : 0,
-    // pause_count : 0,
     sync : rbq_sync::eventcount,
     sync_name : "eventcount",
     quiet : false,
@@ -113,7 +110,6 @@ static struct option long_options[] = {
     {"consumers", required_argument, 0, 'c'},
     {"size", required_argument, 0, 's'},
     {"sync", required_argument, 0, 'x'},
-    // {"pause", required_argument, 0, pause_val},
     {"quiet", no_argument, 0, 'q'},
     {"verbose", no_argument, 0, 'v'},
     {"debug", no_argument, 0, 'd'},
@@ -202,16 +198,12 @@ static bool parse_options(testconfig_t* config, int argc, char** argv)
                 if (ndx >= 0) {
                     config->sync = sync_values[ndx];
                     config->sync_name = optarg;
-                    // fprintf(stderr, "sync=%s\n", optarg);
                 }
                 else {
                     fprintf(stderr, "unknown sync=%s\n", optarg);
                     retval = false;
                 }
                 break;
-            // case pause_val:
-            //     config->pause_count = strtoul(optarg, NULL, 10);
-            //     break;
             case 'q':
                 config->quiet = true;
                 break;
