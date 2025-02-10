@@ -104,28 +104,12 @@ static void update_stats(stats_t& stats, stats_t& local_stats)
     atomic_fetch_add(stats.lfrbq_stats.consumer_wraps, tls_lfrbq_stats.consumer_wraps);
 }
 
-/**
- * pause
- * 
- * @param count number of pause instructions
- */
-static void pause(const uint32_t count)
-{
-    for (unsigned int ndx = 0; ndx < count; ndx++)
-    {
-        __builtin_ia32_pause();
-    }
-
-}
-
-
 
 void producer(rbq* queue, std::latch* latch, stats_t* stats, testconfig_t* config)
 {
     stats_t local_stats = {};
 
     const uint32_t count = config->count;
-    // const unsigned int pause_count = config->pause_count;
 
     latch->arrive_and_wait();
 
@@ -136,8 +120,6 @@ void producer(rbq* queue, std::latch* latch, stats_t* stats, testconfig_t* confi
         lfrbq_status status = queue->enqueue(ndx);
         if (status != lfrbq_status::success)
             break;
-
-        // pause(pause_count);
         
         local_stats.producer_sums += ndx;
         local_stats.enqueue_count++;
@@ -154,8 +136,6 @@ void consumer(rbq* queue, std::latch* latch, stats_t* stats, testconfig_t* confi
 {
     stats_t local_stats = {};
 
-    // const unsigned int pause_count = config->pause_count;
-
     latch->arrive_and_wait();
 
     uint64_t t0 = getcputime();
@@ -166,8 +146,6 @@ void consumer(rbq* queue, std::latch* latch, stats_t* stats, testconfig_t* confi
         lfrbq_status status = queue->dequeue(&value);
         if (status != lfrbq_status::success)
             break;
-
-        // pause(pause_count);
         
         local_stats.consumer_sums += value;
         local_stats.dequeue_count++;
@@ -256,10 +234,8 @@ static void print_stats(FILE *out, testconfig_t& config, stats_t& stats)
     char *current = setlocale(LC_NUMERIC, "");
     char current_locale[64];
     strncpy(current_locale, current, 64);
-    // fprintf(out,"current locale = %s\n", current_locale);
 
 
-    // locale_t templocale = newlocale(LC_NUMERIC_MASK, "en_US.UTF-8", (locale_t) 0);
     locale_t templocale = newlocale(LC_NUMERIC_MASK, current_locale, (locale_t) 0);
     locale_t prevlocale = uselocale(templocale);  // or (locale_t) 0 or LC_GLOBAL_LOCALE
 
@@ -306,14 +282,6 @@ static void print_stats(FILE *out, testconfig_t& config, stats_t& stats)
         fprintf(out, "  enqueue rate = %'14.4f /sec\n", enq_rate);
         fprintf(out, "  dequeue rate = %'14.4f /sec\n", deq_rate);
 
-        // fprintf(out, "  producer waits = %'llu\n", stats.producer_waits);
-        // fprintf(out, "  consumer waits = %'llu\n", stats.consumer_waits);
-
-        // fprintf(out, "  enqueue try count = %'u\n", stats.lfrb_stats.enqueue_try_count);
-        // fprintf(out, "  dequeue try count = %'u\n", stats.lfrb_stats.dequeue_try_count);
-        // fprintf(out, "  queue full count = %'u\n", stats.lfrb_stats.queue_full_count);
-        // fprintf(out, "  queue empty count = %'u\n", stats.lfrb_stats.queue_empty_count);
-
         fprintf(out, "\n");
         fprintf(out, "  -- process stats --\n");
 
@@ -335,11 +303,6 @@ static void print_stats(FILE *out, testconfig_t& config, stats_t& stats)
         fprintf(out, "  average enq/deq time %'10.4f nsecs\n", avg_overall);
         fprintf(out, "  overall rate = %'10.4f /sec\n", aggregate_rate);
 
-        // avg_overall = avg((stats.ru_utime + stats.ru_stime), enqueue_count, 1);
-        // aggregate_rate = avg_overall == 0.0 ? 0.0 : 1e9 / avg_overall;
-        // fprintf(out, "  *overall enq/deq time %10.4f nsecs\n", avg_overall);
-        // fprintf(out, "  *aggregate rate = %10.4
-        
         fprintf(out, "\n  -- client stats --\n");
 
         fprintf(out, "  queue full count  = %lu\n", stats.lfrbq_stats.queue_full_count);
