@@ -312,6 +312,7 @@ private:
                 full_nodes.release();
                 return status;
             case lfrbq_status::closed:
+                empty_nodes.release();
                 return status;
 
             case lfrbq_status::full:
@@ -336,6 +337,7 @@ private:
                 empty_nodes.release();
                 return status;
             case lfrbq_status::closed:
+                full_nodes.release();
                 return status;
 
             case lfrbq_status::empty:
@@ -412,9 +414,8 @@ public:
         consumer_atomic32.fetch_add(1, std::memory_order_relaxed);
         consumer_atomic32.notify_all();
 
-        int xval = INT_MAX - capacity;  // > # producers and consumers
-        empty_nodes.release(xval);
-        full_nodes.release(xval);
+        empty_nodes.release();
+        full_nodes.release();
     }
 
 };
