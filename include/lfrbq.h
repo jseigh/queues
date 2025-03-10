@@ -46,6 +46,8 @@ struct lfrbq_stats_t {
 
     uint32_t producer_wraps = 0;        // producer detected wraps
     uint32_t consumer_wraps = 0;        // consumer detected wraps
+
+    uint32_t invalid_head_sync = 0;     // head observed by producer w/ staler value than it should have been
 };
 
 inline thread_local lfrbq_stats_t tls_lfrbq_stats;
@@ -272,10 +274,10 @@ private:
 
         for (;;)
         {
-            seq_t tail_copy = tail.load(std::memory_order_relaxed);
+            seq_t tail_copy = tail.load(std::memory_order_acquire);
 
             unsigned int ndx = seq2ndx(tail_copy);
-            seq_t node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+            seq_t node_seq = rbuffer[ndx].seq.load(std::memory_order_acquire);
             if (node_seq & 1)
                 return lfrbq_status::closed;
 
@@ -294,7 +296,7 @@ private:
                 }
 
                 ndx = seq2ndx(tail_copy);
-                node_seq = rbuffer[ndx].seq.load(std::memory_order_relaxed);
+                node_seq = rbuffer[ndx].seq.load(std::memory_order_acquire);
                 if (node_seq & Q_CLOSED)
                     return lfrbq_status::closed;
             }
@@ -313,8 +315,15 @@ private:
             if (!any)
             {
                 seq_t head_copy = head.load(std::memory_order_relaxed);
-                if ((node_seq + ndx) == head_copy)
+                int64_t cc = xcmp((node_seq + ndx), head_copy);
+                // if ((node_seq + ndx) == head_copy)
+                if (cc == 0)
                     return lfrbq_status::full;
+
+                if (cc > 0) {                                   // head too stale, observed as less than tail (should never happen)
+                    tls_lfrbq_stats.invalid_head_sync++;
+                    return lfrbq_status::full;                  // handle as full and hope memory syncs up after polling retry
+                }
             }
 
             // seq == tail
