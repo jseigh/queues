@@ -102,6 +102,8 @@ static void update_stats(stats_t& stats, stats_t& local_stats)
     atomic_fetch_add(stats.lfrbq_stats.consumer_retries, tls_lfrbq_stats.consumer_retries);
     atomic_fetch_add(stats.lfrbq_stats.producer_wraps, tls_lfrbq_stats.producer_wraps);
     atomic_fetch_add(stats.lfrbq_stats.consumer_wraps, tls_lfrbq_stats.consumer_wraps);
+
+    atomic_fetch_add(stats.lfrbq_stats.invalid_head_sync, tls_lfrbq_stats.invalid_head_sync);
 }
 
 
@@ -315,6 +317,8 @@ static void print_stats(FILE *out, testconfig_t& config, stats_t& stats)
 
         fprintf(out, "  producer wraps    = %lu\n", stats.lfrbq_stats.producer_wraps);
         fprintf(out, "  consumer wraps    = %lu\n", stats.lfrbq_stats.consumer_wraps);
+
+        fprintf(out, "  invalid head sync = %lu\n", stats.lfrbq_stats.invalid_head_sync);
     }
 
     uselocale(prevlocale);
